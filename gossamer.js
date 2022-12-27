@@ -85,7 +85,13 @@ function memorySalience(c, memory) {
 function getAllMemories(c) {
   const db = allChars[c].memories;
   const datoms = datascript.q(`[:find ?e :where [?e "type" "memory"]]`, db);
-  return datoms.map(datom => getEntity(db, datom[0]));
+  return datoms.map(datom => {
+    const memory = getEntity(db, datom[0]);
+    // Wrap tag and bystander values in an array if they aren't already
+    if (typeof memory.tag === "string") memory.tag = [memory.tag];
+    if (typeof memory.bystander === "string") memory.bystander = [memory.bystander];
+    return memory;
+  });
 }
 
 function loveInterest(c) {
@@ -131,6 +137,16 @@ function addMemory(charID, memory) {
   }
   const char = allChars[charID];
   char.memories = datascript.db_with(char.memories, addMemoryTx);
+}
+
+function reinforceMemory(charID, memory) {
+  const char = allChars[charID];
+  const newStrength = memory.strength + memorySalience(charID, memory);
+  const strengthenMemoryTx = [
+    [":db/add", memory[":db/id"], "strength", newStrength],
+    [":db/add", memory[":db/id"], "ruminationCount", (memory.ruminationCount || 0) + 1]
+  ];
+  char.memories = datascript.db_with(char.memories, strengthenMemoryTx);
 }
 
 const tagMutationRates = {
@@ -350,6 +366,7 @@ function tick(day) {
         // FIXME Use salience to pick which memory to share?
         if (memories.length > 0) {
           const originalMemory = randNth(memories);
+          reinforceMemory(char.id, originalMemory); // Sharing a memory reinforces it
           const sharedMemory = clone(originalMemory);
           sharedMemory.provenance = char.id;
           sharedMemory.strength = memorySalience(targetCharID, sharedMemory);
@@ -383,14 +400,9 @@ function tick(day) {
           allActions[workAction.id] = workAction;
         }
         else if (memories.length > 0 && chance(0.5)) {
-          // Ruminate on a random memory, strengthening it. FIXME Prefer more salient memories?
+          // Ruminate on a random memory, reinforcing it. FIXME Prefer more salient memories?
           const memory = randNth(memories);
-          const newStrength = memory.strength + memorySalience(char.id, memory);
-          const strengthenMemoryTx = [
-            [":db/add", memory[":db/id"], "strength", newStrength],
-            [":db/add", memory[":db/id"], "ruminationCount", (memory.ruminationCount || 0) + 1]
-          ];
-          char.memories = datascript.db_with(char.memories, strengthenMemoryTx);
+          reinforceMemory(char.id, memory);
           const ruminateAction = {
             type: "action", id: genID("A"),
             actionType: "ruminate", actor: char.id, place: place, day: day,
