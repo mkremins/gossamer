@@ -1,0 +1,19 @@
+// BROADCAST ACTIONS
+// - Hold forth (tell a story to *everyone*?)
+// - Perform music, if in a performance-compatible venue?
+
+// DYADIC ACTIONS
+// - Make small talk with someone present
+// - Talk with someone present (swap stories?)
+// - Ask someone present a question (receive a story?)
+// - Ramble at someone present (tell a story?)
+// - Flirt with someone present they're attracted to
+// - Implicit: introduction, if this is the first time they've met?
+// - Implicit: invite to hang out, if that's how we got here?
+
+// SOLO ACTIONS
+// - Work diligently if they're in a worker role
+// - Slack off (implicitly, by doing something else?) if they're in a worker role
+// - Laze around if they're at home
+// - Ruminate on memory or story?
+// - Perform the... location-default solo leisure activity???

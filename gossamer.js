@@ -134,18 +134,33 @@ function addMemory(charID, memory) {
 }
 
 const tagMutationRates = {
+  // chat tags
   flirty: {friendly: 10, neutral: 10, rude: 5},
   friendly: {flirty: 10, neutral: 10, rude: 5},
   neutral: {flirty: 5, friendly: 5, rude: 5},
   rude: {neutral: 10, friendly: 5, flirty: 5},
+  // work tags
+  diligent: {adequate: 10, lazy: 5},
+  adequate: {diligent: 10, lazy: 10},
+  lazy: {adequate: 10, diligent: 5},
+  // vibe tags
+  relaxed: {okay: 10, lonely: 5},
+  okay: {relaxed: 10, lonely: 10},
+  lonely: {okay: 10, relaxed: 5}
 };
 for (const [tag, rates] of Object.entries(tagMutationRates)) {
   rates[tag] = 100 - sum(Object.values(rates));
 }
 
 function maybeMutate(memory) {
-  memory.tags = distinct(memory.tags.map(tag => weightedChoice(tagMutationRates[tag])));
-  if (memory.provenance !== "involved" && chance(0.1)) {
+  if (memory.tags) {
+    // Stochastically mutate individual tags.
+    memory.tags = distinct(memory.tags.map(tag => {
+      const mutationRates = tagMutationRates[tag];
+      return mutationRates ? weightedChoice(mutationRates) : tag;
+    }));
+  }
+  if (memory.provenance !== "involved" && memory.target && chance(0.1)) {
     // Swap the actor and the target.
     [memory.actor, memory.target] = [memory.target, memory.actor];
   }
@@ -224,6 +239,7 @@ function startup(castSize) {
 function tick(day) {
   const weekday = day % 7;
   console.log("DAY", day, "WEEKDAY", weekday);
+  const newActions = [];
 
   // PHASE 1: PLACEMENT
   // Generate a whereabouts entry for every character, based on their schedule
@@ -262,6 +278,13 @@ function tick(day) {
         });
         const invite = biasedRandNth(invitesByVibes, 10);
         whereabouts.push({who: char.id, where: invite.where, invitedBy: invite.who});
+        // Add this invitation to the record of all actions.
+        const inviteAction = {
+          type: "action", id: genID("A"),
+          actionType: "invite", actor: invite.who, target: char.id, day: day
+        };
+        newActions.push(inviteAction);
+        allActions[inviteAction.id] = inviteAction;
       }
       else {
         // Head to either a public hangout spot or home.
@@ -288,31 +311,22 @@ function tick(day) {
   // - Gather the characters who are there.
   // - Generate actions between them. For now, every character gets to act once.
   const actionPhaseStartTime = performance.now();
-  const newActions = [];
   for (const [place, localCast] of Object.entries(whereaboutsByPlace)) {
     const isAlone = localCast.length === 1;
     for (const charInfo of localCast) {
       const char = allChars[charInfo.who];
-      const otherCharInfos = localCast.filter(ci => ci.who !== charInfo.who);
+      const otherCharIDs = localCast.map(ci => ci.who).filter(id => id !== charInfo.who);
+      const memories = getAllMemories(char.id); // prefetch memories; many action types use them
       // Things that a character might do:
       if (!isAlone && chance(0.1)) {
         // BROADCAST ACTIONS
-        // - Hold forth (tell a story to *everyone*?)
-        // - Perform music, if in a performance-compatible venue?
         // TODO
       }
       else if (!isAlone && chance(0.75)) {
         // DYADIC ACTIONS
-        // - Make small talk with someone present
-        // - Talk with someone present (swap stories?)
-        // - Ask someone present a question (receive a story?)
-        // - Ramble at someone present (tell a story?)
-        // - Flirt with someone present they're attracted to
-        // - Implicit: introduction, if this is the first time they've met?
-        // - Implicit: invite to hang out, if that's how we got here?
         // Decide who to interact with from all the nearby chars.
         // Prefer chars the actor feels more positively about overall.
-        const otherCharsByVibes = otherCharInfos.map(oci => oci.who).sort((a, b) => {
+        const otherCharsByVibes = otherCharIDs.sort((a, b) => {
           return positiveFeeling(char.id, b) - positiveFeeling(char.id, a);
         });
         const targetCharID = biasedRandNth(otherCharsByVibes, 10);
@@ -320,7 +334,7 @@ function tick(day) {
         const action = {
           type: "action", id: genID("A"),
           actionType: "chat", actor: char.id, target: targetShip.dst, place: place, day: day,
-          bystanders: otherCharInfos.filter(ci => ci.who !== targetShip.dst).map(ci => ci.who)
+          bystanders: otherCharIDs.filter(id => id !== targetShip.dst)
         };
         // Figure out the actor's *intended* tone.
         // FIXME Maybe every char should also have a *default tone* that's always added?
@@ -332,6 +346,17 @@ function tick(day) {
         action.tags = intendedTones;
         // If this is the first direct interaction between these chars, mark it as an introduction.
         if (targetShip.directInteractions === 0) action.tags.push("introduction");
+        // If there are any memories for the actor to share, pick one at random and share it.
+        // FIXME Use salience to pick which memory to share?
+        if (memories.length > 0) {
+          const originalMemory = randNth(memories);
+          const sharedMemory = clone(originalMemory);
+          sharedMemory.provenance = char.id;
+          sharedMemory.strength = memorySalience(targetCharID, sharedMemory);
+          delete sharedMemory[":db/id"];
+          addMemory(targetCharID, sharedMemory);
+          action.memory = originalMemory[":db/id"];
+        }
         // Increment direct interactions counter in both directions,
         // and mark both ships as having just been "refreshed" so we don't decay them this turn.
         targetShip.directInteractions += 1;
@@ -346,12 +371,45 @@ function tick(day) {
       }
       else {
         // SOLO ACTIONS
-        // - Work diligently if they're in a worker role
-        // - Slack off (implicitly, by doing something else?) if they're in a worker role
-        // - Laze around if they're at home
-        // - Ruminate on memory or story?
-        // - Perform the... location-default solo leisure activity???
-        // TODO
+        if (charInfo.role === "worker" && chance(0.75)) {
+          // Perform some sort of work action.
+          const workAction = {
+            type: "action", id: genID("A"),
+            actionType: "work", actor: char.id, place: place, day: day,
+            bystanders: otherCharIDs,
+            tags: [randNth(["diligent", "adequate", "lazy"])]
+          };
+          newActions.push(workAction);
+          allActions[workAction.id] = workAction;
+        }
+        else if (memories.length > 0 && chance(0.5)) {
+          // Ruminate on a random memory, strengthening it. FIXME Prefer more salient memories?
+          const memory = randNth(memories);
+          const newStrength = memory.strength + memorySalience(char.id, memory);
+          const strengthenMemoryTx = [
+            [":db/add", memory[":db/id"], "strength", newStrength],
+            [":db/add", memory[":db/id"], "ruminationCount", (memory.ruminationCount || 0) + 1]
+          ];
+          char.memories = datascript.db_with(char.memories, strengthenMemoryTx);
+          const ruminateAction = {
+            type: "action", id: genID("A"),
+            actionType: "ruminate", actor: char.id, place: place, day: day,
+            bystanders: otherCharIDs, memory: memory[":db/id"]
+          };
+          newActions.push(ruminateAction);
+          allActions[ruminateAction.id] = ruminateAction;
+        }
+        else {
+          // Just vibe???
+          const vibeAction = {
+            type: "action", id: genID("A"),
+            actionType: "vibe", actor: char.id, place: place, day: day,
+            bystanders: otherCharIDs,
+            tags: [randNth(["relaxed", "okay", "lonely"])]
+          };
+          newActions.push(vibeAction);
+          allActions[vibeAction.id] = vibeAction;
+        }
       }
     }
   }
@@ -363,36 +421,24 @@ function tick(day) {
   const observationPhaseStartTime = performance.now();
   for (const action of newActions) {
     // Add memory to actor.
-    const actorMemory = {
-      type: "memory", action: action.id, provenance: "involved",
-      actionType: action.actionType, tags: action.tags,
-      actor: action.actor, bystanders: action.bystanders,
-      place: action.place, day: action.day,
-    };
-    if (action.target) actorMemory.target = action.target;
+    const actorMemory = clone(action);
+    actorMemory.type = "memory";
+    actorMemory.action = action.id;
+    actorMemory.provenance = "involved";
     actorMemory.strength = memorySalience(action.actor, actorMemory);
     addMemory(action.actor, actorMemory);
     // Add memory to target, if any.
     if (action.target) {
-      const targetMemory = {
-        type: "memory", action: action.id, provenance: "involved",
-        actionType: action.actionType, tags: action.tags,
-        actor: action.actor, target: action.target, bystanders: action.bystanders,
-        place: action.place, day: action.day,
-      };
+      const targetMemory = clone(actorMemory);
       targetMemory.strength = memorySalience(action.target, targetMemory);
       maybeMutate(targetMemory);
       addMemory(action.target, targetMemory);
     }
     // Stochastically add memory to bystanders, if any.
-    for (const bystander of action.bystanders) {
+    for (const bystander of action.bystanders || []) {
       if (chance(0.5)) continue; // FIXME Use salience to determine chance of witnessing?
-      const bystanderMemory = {
-        type: "memory", action: action.id, provenance: "bystander",
-        actionType: action.actionType, tags: action.tags,
-        actor: action.actor, target: action.target, bystanders: action.bystanders,
-        place: action.place, day: action.day,
-      };
+      const bystanderMemory = clone(actorMemory);
+      bystanderMemory.provenance = "bystander";
       bystanderMemory.strength = memorySalience(bystander, bystanderMemory);
       maybeMutate(bystanderMemory);
       addMemory(bystander, bystanderMemory);
