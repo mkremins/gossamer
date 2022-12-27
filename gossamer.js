@@ -11,15 +11,20 @@ const allActions = {};
 
 const allSiftingPatterns = [
   {
-    name: "rudeness unto rudeness",
+    name: "paying rudeness unto rudeness",
     find: `[?e1 "type" action] [?e1 "actionType" chat]
-           [?e1 "actor" ?rudeChar] [?e1 "target" $ME] [?e1 "tag" "rude"]
+           [?e1 "actor" ?rudeChar] [?e1 "target" ?target] [?e1 "tag" "rude"]
            [?e2 "type" "action"] [?e2 "actionType" "chat"]
-           [?e2 "actor" ?rudeChar] [?e2 "target" $ME] [?e2 "tag" "rude"]
+           [?e2 "actor" ?rudeChar] [?e2 "target" ?target] [?e2 "tag" "rude"]
            [?e3 "type" "action"] [?e3 "actionType" "chat"]
-           [?e3 "actor" ?otherChar] [?e3 "target" ?rudeChar] [?e3 "tag" "rude"]`
+           [?e3 "actor" ?retaliator] [?e3 "target" ?rudeChar] [?e3 "tag" "rude"]`
   }
 ];
+
+const charDBSchema = {
+  bystander: {":db/cardinality": ":db.cardinality/many"},
+  tag: {":db/cardinality": ":db.cardinality/many"}
+};
 
 let nextTick = 0;
 function doTicks(n) {
@@ -60,6 +65,29 @@ function includesAnimosity(ship) {
   return ship.charge <= -20;
 }
 
+function positiveFeeling(c1, c2) {
+  const ship = getOrCreateShip(c1, c2);
+  return Math.max(0, ship.charge) + Math.max(0, ship.spark);
+}
+
+function charSalience(c1, c2) {
+  if (c1 === c2) return 250; // salience of self = salience of maximally liked person + 30
+  const ship = getOrCreateShip(c1, c2);
+  return Math.abs(ship.charge) + Math.max(0, ship.spark) + Math.min(ship.directInteractions, 20);
+}
+
+function memorySalience(c, memory) {
+  const actorSalience = charSalience(c, memory.actor);
+  const targetSalience = memory.target ? charSalience(c, memory.target) : 0;
+  return actorSalience + targetSalience;
+}
+
+function getAllMemories(c) {
+  const db = allChars[c].memories;
+  const datoms = datascript.q(`[:find ?e :where [?e "type" "memory"]]`, db);
+  return datoms.map(datom => getEntity(db, datom[0]));
+}
+
 function loveInterest(c) {
   return Object.values(allShips[c]).sort((a,b) => { return b.spark - a.spark; })[0];
 }
@@ -84,6 +112,45 @@ function directInteractionHistory(c1, c2) {
   });
 }
 
+function addMemory(charID, memory) {
+  const addMemoryTx = [];
+  for (const [key, val] of Object.entries(memory)) {
+    if (key === "tags") {
+      for (const tag of val) {
+        addMemoryTx.push([":db/add", -1, "tag", tag]);
+      }
+    }
+    else if (key === "bystanders") {
+      for (const bystander of val) {
+        addMemoryTx.push([":db/add", -1, "bystander", bystander]);
+      }
+    }
+    else {
+      addMemoryTx.push([":db/add", -1, key, val]);
+    }
+  }
+  const char = allChars[charID];
+  char.memories = datascript.db_with(char.memories, addMemoryTx);
+}
+
+const tagMutationRates = {
+  flirty: {friendly: 10, neutral: 10, rude: 5},
+  friendly: {flirty: 10, neutral: 10, rude: 5},
+  neutral: {flirty: 5, friendly: 5, rude: 5},
+  rude: {neutral: 10, friendly: 5, flirty: 5},
+};
+for (const [tag, rates] of Object.entries(tagMutationRates)) {
+  rates[tag] = 100 - sum(Object.values(rates));
+}
+
+function maybeMutate(memory) {
+  memory.tags = distinct(memory.tags.map(tag => weightedChoice(tagMutationRates[tag])));
+  if (memory.provenance !== "involved" && chance(0.1)) {
+    // Swap the actor and the target.
+    [memory.actor, memory.target] = [memory.target, memory.actor];
+  }
+}
+
 function startup(castSize) {
   // Generate some homes. For simplicity we'll assume everyone lives with random housemates,
   // so the assignment of people to homes doesn't have to consider interpersonal relationships.
@@ -104,7 +171,10 @@ function startup(castSize) {
   // Generate a cast of characters.
   for (let i = 0; i < castSize; i++) {
     const id = genID("C");
-    const char = {type: "char", id: id, home: randNth(allHomes), memories: []};
+    const char = {
+      type: "char", id: id, home: randNth(allHomes),
+      memories: datascript.empty_db(charDBSchema)
+    };
     allChars[id] = char;
 
     // Give the character one or two favorite places to hang out.
@@ -186,14 +256,11 @@ function tick(day) {
       // character personality traits like extroversion.
       if (possibleInvites.length > 0 && chance(0.5)) {
         // Accept an invitation to hang out.
-        // FIXME Stochastically pick one of the top N instead of always going with the strongest?
-        const invite = possibleInvites.sort((a, b) => {
-          const shipA = getOrCreateShip(char.id, a.who);
-          const shipB = getOrCreateShip(char.id, b.who);
-          const scoreA = Math.max(shipA.charge, 0) + Math.max(shipA.spark, 0);
-          const scoreB = Math.max(shipB.charge, 0) + Math.max(shipB.spark, 0);
-          return scoreB - scoreA;
-        })[0];
+        // Prefer invites from chars that this char feels most positively about.
+        const invitesByVibes = possibleInvites.sort((a, b) => {
+          return positiveFeeling(char.id, b.who) - positiveFeeling(char.id, a.who);
+        });
+        const invite = biasedRandNth(invitesByVibes, 10);
         whereabouts.push({who: char.id, where: invite.where, invitedBy: invite.who});
       }
       else {
@@ -243,8 +310,13 @@ function tick(day) {
         // - Flirt with someone present they're attracted to
         // - Implicit: introduction, if this is the first time they've met?
         // - Implicit: invite to hang out, if that's how we got here?
-        const ships = otherCharInfos.map(otherCI => getOrCreateShip(char.id, otherCI.who));
-        const targetShip = randNth(ships); // FIXME target people we already know more often?
+        // Decide who to interact with from all the nearby chars.
+        // Prefer chars the actor feels more positively about overall.
+        const otherCharsByVibes = otherCharInfos.map(oci => oci.who).sort((a, b) => {
+          return positiveFeeling(char.id, b) - positiveFeeling(char.id, a);
+        });
+        const targetCharID = biasedRandNth(otherCharsByVibes, 10);
+        const targetShip = getOrCreateShip(char.id, targetCharID);
         const action = {
           type: "action", id: genID("A"),
           actionType: "chat", actor: char.id, target: targetShip.dst, place: place, day: day,
@@ -288,45 +360,42 @@ function tick(day) {
 
   // PHASE 3: OBSERVATION
   // For every action, add memories to present characters.
-  // For dyadic actions, also perform default  
-  // FIXME This should probably be adjusted to use some sort of salience computation
-  // to set the initial strength of each memory, and maybe also as part of deciding
-  // which bystanders form a memory of the action in the first place.
   const observationPhaseStartTime = performance.now();
   for (const action of newActions) {
     // Add memory to actor.
     const actorMemory = {
-      type: "memory", action: action.id, provenance: "involved", strength: 20,
+      type: "memory", action: action.id, provenance: "involved",
       actionType: action.actionType, tags: action.tags,
       actor: action.actor, bystanders: action.bystanders,
       place: action.place, day: action.day,
     };
     if (action.target) actorMemory.target = action.target;
-    allChars[action.actor].memories.push(actorMemory);
+    actorMemory.strength = memorySalience(action.actor, actorMemory);
+    addMemory(action.actor, actorMemory);
     // Add memory to target, if any.
     if (action.target) {
       const targetMemory = {
-        type: "memory", action: action.id, provenance: "involved", strength: 20,
-        actionType: action.actionType, actor: action.actor,
-        target: action.target, bystanders: action.bystanders,
+        type: "memory", action: action.id, provenance: "involved",
+        actionType: action.actionType, tags: action.tags,
+        actor: action.actor, target: action.target, bystanders: action.bystanders,
         place: action.place, day: action.day,
       };
-      targetMemory.tags = action.tags; // TODO Maybe mutate tags lightly
-      allChars[action.target].memories.push(targetMemory);
+      targetMemory.strength = memorySalience(action.target, targetMemory);
+      maybeMutate(targetMemory);
+      addMemory(action.target, targetMemory);
     }
     // Stochastically add memory to bystanders, if any.
     for (const bystander of action.bystanders) {
       if (chance(0.5)) continue; // FIXME Use salience to determine chance of witnessing?
       const bystanderMemory = {
         type: "memory", action: action.id, provenance: "bystander",
-        strength: 5, // FIXME Use salience to determine initial strength?
-        actionType: action.actionType, actor: action.actor,
-        target: action.target, bystanders: action.bystanders,
+        actionType: action.actionType, tags: action.tags,
+        actor: action.actor, target: action.target, bystanders: action.bystanders,
         place: action.place, day: action.day,
       };
-      bystanderMemory.tags = action.tags; // TODO Maybe mutate tags lightly
-      // FIXME Also maybe swap actor and target rarely?
-      allChars[bystander].memories.push(bystanderMemory);
+      bystanderMemory.strength = memorySalience(bystander, bystanderMemory);
+      maybeMutate(bystanderMemory);
+      addMemory(bystander, bystanderMemory);
     }
   }
   console.log("observation phase took", performance.now() - observationPhaseStartTime, "ms");
@@ -340,7 +409,7 @@ function tick(day) {
   for (const char of Object.values(allChars)) {
     // Run sifting patterns to update stories.
     for (const pattern of allSiftingPatterns) { // FIXME Use only this char's patterns?
-      // TODO
+      //const matches = datascript.q(...); // TODO
     }
     // Update relationships.
     for (const ship of Object.values(allShips[char.id] || {})) {
@@ -369,8 +438,21 @@ function tick(day) {
       }
     }
     // Decay memories. FIXME Stories too?
-    char.memories.forEach(mem => mem.strength -= 1);
-    char.memories = char.memories.filter(mem => mem.strength > 1);
+    const decayMemoriesTx = [];
+    const allMemories = datascript.q(
+      `[:find ?id ?strength :where [?id "type" "memory"] [?id "strength" ?strength]]`,
+      char.memories
+    );
+    for (const [memoryID, memoryStrength] of allMemories) {
+      const newStrength = memoryStrength - 10;
+      if (newStrength > 0) {
+        decayMemoriesTx.push([":db/add", memoryID, "strength", newStrength]);
+      }
+      else {
+        decayMemoriesTx.push([":db/retractEntity", memoryID]);
+      }
+    }
+    char.memories = datascript.db_with(char.memories, decayMemoriesTx);
   }
   console.log("reflection phase took", performance.now() - reflectionPhaseStartTime, "ms");
 }

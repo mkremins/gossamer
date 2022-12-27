@@ -43,6 +43,36 @@ function fairmath(params) {
   return Math.max(min, Math.min(max, uncappedResult));
 }
 
+// Given the DB and an EID, retrieve the corresponding entity as an object.
+// This is what `datascript.entity(db, eid)` SHOULD do, but for some reason doesn't.
+function getEntity(db, eid) {
+  const attrValuePairs = datascript.q("[:find ?a ?v :in $ ?e :where [?e ?a ?v]]", db, eid);
+  if (attrValuePairs.length === 0) return null;
+  const entity = {":db/id": eid};
+  for (const [attr, val] of attrValuePairs) {
+    // FIXME This is a little rough because we're trying to infer cardinality
+    // without looking at the schema. By default, if we see a single attr
+    // multiple times in the same result set, we assume it's cardinality-many
+    // and bundle all its values into an array. This is flawed though:
+    // for one thing, if a cardinality-many attr happens to have only one
+    // value for this entity, we won't correctly wrap that single value
+    // in an array, which could break assumptions in calling code.
+    // Might be worth investigating whether there's some clean way to retrieve
+    // the schema from an arbitrary DataScript DB that still works even if
+    // we're using a minified version of DataScript.
+    if (entity[attr] && Array.isArray(entity[attr])) {
+      entity[attr].push(val);
+    }
+    else if (entity[attr]) {
+      entity[attr] = [entity[attr], val];
+    }
+    else {
+      entity[attr] = val;
+    }
+  }
+  return entity;
+}
+
 // Given a classifier function `f` and a list of `xs` to classify,
 // return an object keyed by `f(x)` containing the resulting groups.
 function groupBy(f, xs) {
@@ -60,6 +90,19 @@ function randNth(items){
   return items[Math.floor(Math.random()*items.length)];
 }
 
+// Like `randNth`, but biased toward earlier items in the list.
+// Higher values of `bias` (default = 1) produce a stronger biasing effect;
+// `bias` of 0 behaves identically to `randNth`.
+function biasedRandNth(items, bias) {
+  bias = bias || 1;
+  const r = Math.random();
+  let rBiased = r;
+  for (let i = 0; i < bias; i++) {
+    rBiased *= r; // repeatedly multiply r by itself to bias toward the low end
+  }
+  return items[Math.floor(rBiased * items.length)];
+}
+
 // Return a shuffled copy of a list, leaving the original list unmodified.
 function shuffle(items) {
   const newItems = [];
@@ -75,4 +118,19 @@ function shuffle(items) {
 
 function sum(xs) {
   return xs.reduce((a, b) => a + b);
+}
+
+// Given a map like `{outcome: weight}`, returns a randomly chosen `outcome`.
+// The likelihood that a particular `outcome` will be chosen is proportional to
+// its assigned `weight`.
+function weightedChoice(options) {
+  const sumOfWeights = sum(Object.values(options));
+  const r = Math.random();
+  let cumulativeSum = 0;
+  for (const [outcome, weight] of Object.entries(options)) {
+    cumulativeSum += weight / sumOfWeights;
+    if (r <= cumulativeSum) return outcome;
+  }
+  // Fallback case. Kinda ugly, but should only get here if all weights are zero.
+  return randNth(Object.keys(options));
 }
