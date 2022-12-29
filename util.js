@@ -1,19 +1,11 @@
+/// MATH UTILS
+
 function avg(xs) {
   return sum(xs) / xs.length;
 }
 
-function clone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-function chance(val) {
-  return Math.random() <= val;
-}
-
-// Given a list of items that may contain duplicates,
-// return an updated copy of the list without any duplicates.
-function distinct(items){
-  return items.filter((val, idx) => items.indexOf(val) === idx);
+function sum(xs) {
+  return xs.reduce((a, b) => a + b);
 }
 
 // Generalized implementation of ChoiceScript's "fairmath":
@@ -43,34 +35,18 @@ function fairmath(params) {
   return Math.max(min, Math.min(max, uncappedResult));
 }
 
-// Given the DB and an EID, retrieve the corresponding entity as an object.
-// This is what `datascript.entity(db, eid)` SHOULD do, but for some reason doesn't.
-function getEntity(db, eid) {
-  const attrValuePairs = datascript.q("[:find ?a ?v :in $ ?e :where [?e ?a ?v]]", db, eid);
-  if (attrValuePairs.length === 0) return null;
-  const entity = {":db/id": eid};
-  for (const [attr, val] of attrValuePairs) {
-    // FIXME This is a little rough because we're trying to infer cardinality
-    // without looking at the schema. By default, if we see a single attr
-    // multiple times in the same result set, we assume it's cardinality-many
-    // and bundle all its values into an array. This is flawed though:
-    // for one thing, if a cardinality-many attr happens to have only one
-    // value for this entity, we won't correctly wrap that single value
-    // in an array, which could break assumptions in calling code.
-    // Might be worth investigating whether there's some clean way to retrieve
-    // the schema from an arbitrary DataScript DB that still works even if
-    // we're using a minified version of DataScript.
-    if (entity[attr] && Array.isArray(entity[attr])) {
-      entity[attr].push(val);
-    }
-    else if (entity[attr]) {
-      entity[attr] = [entity[attr], val];
-    }
-    else {
-      entity[attr] = val;
-    }
-  }
-  return entity;
+
+/// DATASTRUCTURE UTILS
+
+// Return a (deep) clone of any JSON-compatible `obj`.
+function clone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// Given a list of `xs` that may contain duplicates,
+// return an updated copy of the list without any duplicates.
+function distinct(xs) {
+  return xs.filter((val, idx) => xs.indexOf(val) === idx);
 }
 
 // Given a classifier function `f` and a list of `xs` to classify,
@@ -85,9 +61,16 @@ function groupBy(f, xs) {
   return groups;
 }
 
+
+/// RANDOMNESS UTILS
+
+function chance(val) {
+  return Math.random() <= val;
+}
+
 // Return a random item from a list.
-function randNth(items){
-  return items[Math.floor(Math.random()*items.length)];
+function randNth(items) {
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 // Like `randNth`, but biased toward earlier items in the list.
@@ -116,21 +99,50 @@ function shuffle(items) {
   return newItems;
 }
 
-function sum(xs) {
-  return xs.reduce((a, b) => a + b);
-}
-
-// Given a map like `{outcome: weight}`, returns a randomly chosen `outcome`.
-// The likelihood that a particular `outcome` will be chosen is proportional to
-// its assigned `weight`.
+// Given a map like `{outcome: weight}`, return a randomly chosen `outcome`.
+// The chance of drawing each `outcome` is proportional to its `weight`.
+// Caveat: we assume (and don't check) that all weights are positive numbers.
 function weightedChoice(options) {
   const sumOfWeights = sum(Object.values(options));
   const r = Math.random();
-  let cumulativeSum = 0;
+  let currentOutcomeThreshold = 0;
   for (const [outcome, weight] of Object.entries(options)) {
-    cumulativeSum += weight / sumOfWeights;
-    if (r <= cumulativeSum) return outcome;
+    currentOutcomeThreshold += weight / sumOfWeights;
+    if (r <= currentOutcomeThreshold) return outcome;
   }
-  // Fallback case. Kinda ugly, but should only get here if all weights are zero.
+  // Fallback. Kinda ugly, but should only get here if all weights are zero.
   return randNth(Object.keys(options));
+}
+
+
+/// DATASCRIPT UTILS
+
+// Given the DB and an EID, retrieve the corresponding entity as an object.
+// This is what `datascript.entity(db, eid)` SHOULD do, but for some reason doesn't.
+function getEntity(db, eid) {
+  const attrValuePairs = datascript.q("[:find ?a ?v :in $ ?e :where [?e ?a ?v]]", db, eid);
+  if (attrValuePairs.length === 0) return null;
+  const entity = {":db/id": eid};
+  for (const [attr, val] of attrValuePairs) {
+    // FIXME This is a little rough because we're trying to infer cardinality
+    // without looking at the schema. By default, if we see a single attr
+    // multiple times in the same result set, we assume it's cardinality-many
+    // and bundle all its values into an array. This is flawed though:
+    // for one thing, if a cardinality-many attr happens to have only one
+    // value for this entity, we won't correctly wrap that single value
+    // in an array, which could break assumptions in calling code.
+    // Might be worth investigating whether there's some clean way to retrieve
+    // the schema from an arbitrary DataScript DB that still works even if
+    // we're using a minified version of DataScript.
+    if (entity[attr] && Array.isArray(entity[attr])) {
+      entity[attr].push(val);
+    }
+    else if (entity[attr]) {
+      entity[attr] = [entity[attr], val];
+    }
+    else {
+      entity[attr] = val;
+    }
+  }
+  return entity;
 }
