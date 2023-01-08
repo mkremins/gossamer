@@ -1,8 +1,3 @@
-/**
-High-level design:
-- Every character has their own DB of events/knowledge/etc.
-*/
-
 const allChars = {};
 const allHomes = [];
 const allBusinesses = [];
@@ -12,14 +7,40 @@ const allActions = {};
 const allSiftingPatterns = [
   {
     name: "paying rudeness unto rudeness",
-    find: `[?e1 "type" action] [?e1 "actionType" chat]
-           [?e1 "actor" ?rudeChar] [?e1 "target" ?target] [?e1 "tag" "rude"]
-           [?e2 "type" "action"] [?e2 "actionType" "chat"]
-           [?e2 "actor" ?rudeChar] [?e2 "target" ?target] [?e2 "tag" "rude"]
-           [?e3 "type" "action"] [?e3 "actionType" "chat"]
-           [?e3 "actor" ?retaliator] [?e3 "target" ?rudeChar] [?e3 "tag" "rude"]`
-  }
+    where: ["?e1 tag rude", "?e1 actor ?rudeChar", "?e1 target ?target",
+            "?e2 tag rude", "?e2 actor ?rudeChar", "?e2 target ?target",
+            "?e3 tag rude", "?e3 actor ?retaliator", "?e3 target ?rudeChar",
+            "(< ?e1 ?e2 ?e3)"]
+  },
+  {
+    name: "an unrequited crush",
+    where: ["?e1 tag flirty", "?e1 actor ?crusher", "?e1 target ?crushee",
+            "?e2 tag flirty", "?e2 actor ?crusher", "?e2 target ?crushee",
+            "(< ?e1 ?e2)",
+            `(not-join [?crusher ?crushee]
+               [?e3 "actor" ?crushee] [?e3 "target" ?crusher] [?e3 "tag" "flirty"] [(< ?e2 ?e3)])`]
+  },
+  {
+    name: "mutual romantic interest",
+    where: ["?e1 tag flirty", "?e1 actor ?c1", "?e1 target ?c2",
+            "?e2 tag flirty", "?e2 actor ?c2", "?e2 target ?c1",
+            "(< ?e1 ?e2)"]
+  },
+  {
+    name: "undirected flirtatiousness",
+    where: ["?e1 tag flirty", "?e1 actor ?flirtyChar", "?e1 target ?target1",
+            "?e2 tag flirty", "?e2 actor ?flirtyChar", "?e2 target ?target2",
+            "(not= ?target1 ?target2)",
+            "(< ?e1 ?e2)"]
+  },
 ];
+// Compile sifting patterns for faster execution later.
+for (let i = 0; i < allSiftingPatterns.length; i++) {
+  const uncompiledPattern = allSiftingPatterns[i];
+  const compiledPattern = parseSiftingPattern(uncompiledPattern.where);
+  compiledPattern.name = uncompiledPattern.name;
+  allSiftingPatterns[i] = compiledPattern;
+}
 
 const charDBSchema = {
   bystander: {":db/cardinality": ":db.cardinality/many"},
@@ -467,7 +488,17 @@ function tick(day) {
   for (const char of Object.values(allChars)) {
     // Run sifting patterns to update stories.
     for (const pattern of allSiftingPatterns) { // FIXME Use only this char's patterns?
-      //const matches = datascript.q(...); // TODO
+      const rawMatches = datascript.q(pattern.query, char.memories);
+      if (rawMatches.length === 0) continue;
+      const matches = rawMatches.map(rawMatch => {
+        const match = {};
+        for (let i = 0; i < pattern.lvars.length; i++) {
+          match[pattern.lvars[i]] = rawMatch[i];
+        }
+        return match;
+      });
+      console.log("STORY", char.id, pattern.name, matches);
+      // TODO
     }
     // Update relationships.
     for (const ship of Object.values(allShips[char.id] || {})) {
